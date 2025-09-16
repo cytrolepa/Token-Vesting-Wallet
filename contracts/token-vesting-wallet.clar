@@ -8,8 +8,12 @@
 (define-constant ERR_INVALID_BENEFICIARY (err u8))
 (define-constant ERR_SCHEDULE_ALREADY_EXISTS (err u9))
 (define-constant ERR_ZERO_AMOUNT (err u10))
+(define-constant ERR_TEMPLATE_NOT_FOUND (err u11))
+(define-constant ERR_TEMPLATE_ALREADY_EXISTS (err u12))
+(define-constant ERR_INVALID_TEMPLATE_NAME (err u13))
 
 (define-data-var owner principal tx-sender)
+(define-data-var template-counter uint u0)
 (define-data-var token-contract principal .token-vesting-wallet)
 
 (define-map vesting-schedules
@@ -30,6 +34,23 @@
   { balance: uint }
 )
 
+(define-map vesting-templates
+  { template-id: uint }
+  {
+    name: (string-ascii 64),
+    description: (string-ascii 256),
+    cliff-duration: uint,
+    vesting-duration: uint,
+    created-by: principal,
+    active: bool
+  }
+)
+
+(define-map template-name-index
+  { name: (string-ascii 64) }
+  { template-id: uint }
+)
+
 (define-read-only (get-owner)
   (var-get owner)
 )
@@ -44,6 +65,25 @@
 
 (define-read-only (get-vesting-balance (beneficiary principal))
   (default-to { balance: u0 } (map-get? vesting-balances { beneficiary: beneficiary }))
+)
+
+(define-read-only (get-template-counter)
+  (var-get template-counter)
+)
+
+(define-read-only (get-vesting-template (template-id uint))
+  (map-get? vesting-templates { template-id: template-id })
+)
+
+(define-read-only (get-template-by-name (name (string-ascii 64)))
+  (match (map-get? template-name-index { name: name })
+    some-index (get-vesting-template (get template-id some-index))
+    none
+  )
+)
+
+(define-read-only (get-template-id-by-name (name (string-ascii 64)))
+  (map-get? template-name-index { name: name })
 )
 
 (define-read-only (calculate-vested-amount (beneficiary principal))
@@ -343,4 +383,217 @@
     
     (ok true)
   )
+)
+
+(define-public (create-vesting-template
+  (name (string-ascii 64))
+  (description (string-ascii 256))
+  (cliff-duration uint)
+  (vesting-duration uint)
+)
+  (let (
+    (template-id (+ (var-get template-counter) u1))
+    (existing-template (get-template-by-name name))
+  )
+    (asserts! (is-owner) ERR_UNAUTHORIZED)
+    (asserts! (> (len name) u0) ERR_INVALID_TEMPLATE_NAME)
+    (asserts! (> vesting-duration u0) ERR_INVALID_DURATION)
+    (asserts! (is-none existing-template) ERR_TEMPLATE_ALREADY_EXISTS)
+    
+    (map-set vesting-templates
+      { template-id: template-id }
+      {
+        name: name,
+        description: description,
+        cliff-duration: cliff-duration,
+        vesting-duration: vesting-duration,
+        created-by: tx-sender,
+        active: true
+      }
+    )
+    
+    (map-set template-name-index
+      { name: name }
+      { template-id: template-id }
+    )
+    
+    (var-set template-counter template-id)
+    (ok template-id)
+  )
+)
+
+(define-public (update-vesting-template
+  (template-id uint)
+  (description (string-ascii 256))
+  (cliff-duration uint)
+  (vesting-duration uint)
+)
+  (let (
+    (template (unwrap! (get-vesting-template template-id) ERR_TEMPLATE_NOT_FOUND))
+  )
+    (asserts! (is-owner) ERR_UNAUTHORIZED)
+    (asserts! (get active template) ERR_TEMPLATE_NOT_FOUND)
+    (asserts! (> vesting-duration u0) ERR_INVALID_DURATION)
+    
+    (map-set vesting-templates
+      { template-id: template-id }
+      (merge template {
+        description: description,
+        cliff-duration: cliff-duration,
+        vesting-duration: vesting-duration
+      })
+    )
+    
+    (ok true)
+  )
+)
+
+(define-public (deactivate-template (template-id uint))
+  (let (
+    (template (unwrap! (get-vesting-template template-id) ERR_TEMPLATE_NOT_FOUND))
+  )
+    (asserts! (is-owner) ERR_UNAUTHORIZED)
+    (asserts! (get active template) ERR_TEMPLATE_NOT_FOUND)
+    
+    (map-set vesting-templates
+      { template-id: template-id }
+      (merge template { active: false })
+    )
+    
+    (ok true)
+  )
+)
+
+(define-public (create-schedule-from-template
+  (beneficiary principal)
+  (total-amount uint)
+  (start-time uint)
+  (template-id uint)
+)
+  (let (
+    (template (unwrap! (get-vesting-template template-id) ERR_TEMPLATE_NOT_FOUND))
+    (cliff-time (+ start-time (get cliff-duration template)))
+    (existing-schedule (get-vesting-schedule beneficiary))
+  )
+    (asserts! (is-owner) ERR_UNAUTHORIZED)
+    (asserts! (get active template) ERR_TEMPLATE_NOT_FOUND)
+    (asserts! (> total-amount u0) ERR_ZERO_AMOUNT)
+    (asserts! (not (is-eq beneficiary tx-sender)) ERR_INVALID_BENEFICIARY)
+    (asserts! (is-none existing-schedule) ERR_SCHEDULE_ALREADY_EXISTS)
+    
+    (map-set vesting-schedules
+      { beneficiary: beneficiary }
+      {
+        total-amount: total-amount,
+        claimed-amount: u0,
+        start-time: start-time,
+        cliff-time: cliff-time,
+        duration: (get vesting-duration template),
+        created-by: tx-sender,
+        active: true
+      }
+    )
+    
+    (map-set vesting-balances
+      { beneficiary: beneficiary }
+      { balance: total-amount }
+    )
+    
+    (ok true)
+  )
+)
+
+(define-public (create-schedule-from-template-by-name
+  (beneficiary principal)
+  (total-amount uint)
+  (start-time uint)
+  (template-name (string-ascii 64))
+)
+  (let (
+    (template-index (unwrap! (get-template-id-by-name template-name) ERR_TEMPLATE_NOT_FOUND))
+    (template-id (get template-id template-index))
+  )
+    (create-schedule-from-template beneficiary total-amount start-time template-id)
+  )
+)
+
+(define-public (batch-create-from-template
+  (template-id uint)
+  (schedules (list 10 {
+    beneficiary: principal,
+    amount: uint,
+    start-time: uint
+  }))
+)
+  (begin
+    (asserts! (is-owner) ERR_UNAUTHORIZED)
+    (fold create-single-from-template-simple schedules (ok template-id))
+  )
+)
+
+(define-private (create-single-from-template-simple
+  (schedule-data {beneficiary: principal, amount: uint, start-time: uint})
+  (prev-result (response uint uint))
+)
+  (match prev-result
+    ok-value (match (create-schedule-from-template
+      (get beneficiary schedule-data)
+      (get amount schedule-data)
+      (get start-time schedule-data)
+      ok-value
+    )
+      ok-result (ok ok-value)
+      err-result (err err-result)
+    )
+    err-value (err err-value)
+  )
+)
+
+(define-private (create-single-from-template
+  (schedule-data {
+    beneficiary: principal,
+    amount: uint,
+    start-time: uint,
+    template-id: uint
+  })
+  (prev-result (response bool uint))
+)
+  (match prev-result
+    ok-value (create-schedule-from-template
+      (get beneficiary schedule-data)
+      (get amount schedule-data)
+      (get start-time schedule-data)
+      (get template-id schedule-data)
+    )
+    err-value (err err-value)
+  )
+)
+
+(define-read-only (get-all-active-templates)
+  (filter is-template-active 
+    (map get-template-with-id 
+      (generate-template-ids (var-get template-counter))
+    )
+  )
+)
+
+(define-private (generate-template-ids (count uint))
+  (if (<= count u0)
+    (list)
+    (unwrap-panic (as-max-len? 
+      (map + (list u1 u2 u3 u4 u5 u6 u7 u8 u9 u10) (list count count count count count count count count count count))
+      u10
+    ))
+  )
+)
+
+(define-private (get-template-with-id (template-id uint))
+  (match (get-vesting-template template-id)
+    some-template some-template
+    { name: "", description: "", cliff-duration: u0, vesting-duration: u0, created-by: tx-sender, active: false }
+  )
+)
+
+(define-private (is-template-active (template {name: (string-ascii 64), description: (string-ascii 256), cliff-duration: uint, vesting-duration: uint, created-by: principal, active: bool}))
+  (get active template)
 )
