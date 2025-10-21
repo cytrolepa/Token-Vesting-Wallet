@@ -11,6 +11,8 @@
 (define-constant ERR_TEMPLATE_NOT_FOUND (err u11))
 (define-constant ERR_TEMPLATE_ALREADY_EXISTS (err u12))
 (define-constant ERR_INVALID_TEMPLATE_NAME (err u13))
+(define-constant ERR_SCHEDULE_PAUSED (err u14))
+(define-constant ERR_SCHEDULE_NOT_PAUSED (err u15))
 
 (define-data-var owner principal tx-sender)
 (define-data-var template-counter uint u0)
@@ -25,7 +27,9 @@
     cliff-time: uint,
     duration: uint,
     created-by: principal,
-    active: bool
+    active: bool,
+    paused: bool,
+    pause-time: uint
   }
 )
 
@@ -94,13 +98,16 @@
     (cliff-time (get cliff-time schedule))
     (duration (get duration schedule))
     (total-amount (get total-amount schedule))
+    (is-paused (get paused schedule))
+    (pause-time (get pause-time schedule))
+    (effective-time (if is-paused pause-time current-time))
   )
-    (if (< current-time cliff-time)
+    (if (< effective-time cliff-time)
       (ok u0)
-      (if (>= current-time (+ start-time duration))
+      (if (>= effective-time (+ start-time duration))
         (ok total-amount)
         (let (
-          (elapsed-time (- current-time start-time))
+          (elapsed-time (- effective-time start-time))
           (vested-amount (/ (* total-amount elapsed-time) duration))
         )
           (ok vested-amount)
@@ -192,7 +199,9 @@
         cliff-time: cliff-time,
         duration: vesting-duration,
         created-by: tx-sender,
-        active: true
+        active: true,
+        paused: false,
+        pause-time: u0
       }
     )
     
@@ -221,15 +230,16 @@
     (current-claimed (get claimed-amount schedule))
   )
     (asserts! (get active schedule) ERR_SCHEDULE_NOT_FOUND)
+    (asserts! (not (get paused schedule)) ERR_SCHEDULE_PAUSED)
     (asserts! (> claimable-amount u0) ERR_NOTHING_TO_CLAIM)
-    
+
     (try! (as-contract (stx-transfer? claimable-amount tx-sender tx-sender)))
-    
+
     (map-set vesting-schedules
       { beneficiary: tx-sender }
       (merge schedule { claimed-amount: (+ current-claimed claimable-amount) })
     )
-    
+
     (ok claimable-amount)
   )
 )
@@ -328,6 +338,22 @@
   )
 )
 
+(define-read-only (is-schedule-paused (beneficiary principal))
+  (let (
+    (schedule (unwrap! (get-vesting-schedule beneficiary) (err u0)))
+  )
+    (ok (get paused schedule))
+  )
+)
+
+(define-read-only (get-pause-time (beneficiary principal))
+  (let (
+    (schedule (unwrap! (get-vesting-schedule beneficiary) (err u0)))
+  )
+    (ok (get pause-time schedule))
+  )
+)
+
 (define-public (batch-create-schedules 
   (schedules (list 10 {
     beneficiary: principal,
@@ -375,12 +401,58 @@
   )
     (asserts! (is-eq tx-sender (get created-by schedule)) ERR_UNAUTHORIZED)
     (asserts! (get active schedule) ERR_SCHEDULE_NOT_FOUND)
-    
+
     (map-set vesting-schedules
       { beneficiary: beneficiary }
       (merge schedule { created-by: new-owner })
     )
-    
+
+    (ok true)
+  )
+)
+
+(define-public (pause-vesting-schedule (beneficiary principal))
+  (let (
+    (schedule (unwrap! (get-vesting-schedule beneficiary) ERR_SCHEDULE_NOT_FOUND))
+    (current-time (unwrap-panic (get-stacks-block-info? time (- stacks-block-height u1))))
+  )
+    (asserts! (is-owner) ERR_UNAUTHORIZED)
+    (asserts! (get active schedule) ERR_SCHEDULE_NOT_FOUND)
+    (asserts! (not (get paused schedule)) ERR_SCHEDULE_PAUSED)
+
+    (map-set vesting-schedules
+      { beneficiary: beneficiary }
+      (merge schedule {
+        paused: true,
+        pause-time: current-time
+      })
+    )
+
+    (ok true)
+  )
+)
+
+(define-public (resume-vesting-schedule (beneficiary principal))
+  (let (
+    (schedule (unwrap! (get-vesting-schedule beneficiary) ERR_SCHEDULE_NOT_FOUND))
+    (current-time (unwrap-panic (get-stacks-block-info? time (- stacks-block-height u1))))
+    (pause-time (get pause-time schedule))
+    (pause-duration (- current-time pause-time))
+  )
+    (asserts! (is-owner) ERR_UNAUTHORIZED)
+    (asserts! (get active schedule) ERR_SCHEDULE_NOT_FOUND)
+    (asserts! (get paused schedule) ERR_SCHEDULE_NOT_PAUSED)
+
+    (map-set vesting-schedules
+      { beneficiary: beneficiary }
+      (merge schedule {
+        paused: false,
+        start-time: (+ (get start-time schedule) pause-duration),
+        cliff-time: (+ (get cliff-time schedule) pause-duration),
+        pause-time: u0
+      })
+    )
+
     (ok true)
   )
 )
@@ -490,7 +562,9 @@
         cliff-time: cliff-time,
         duration: (get vesting-duration template),
         created-by: tx-sender,
-        active: true
+        active: true,
+        paused: false,
+        pause-time: u0
       }
     )
     
