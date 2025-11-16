@@ -38,6 +38,11 @@
   { balance: uint }
 )
 
+(define-map claim-delegates
+  { beneficiary: principal }
+  { delegate: principal }
+)
+
 (define-map vesting-templates
   { template-id: uint }
   {
@@ -237,6 +242,56 @@
 
     (map-set vesting-schedules
       { beneficiary: tx-sender }
+      (merge schedule { claimed-amount: (+ current-claimed claimable-amount) })
+    )
+
+    (ok claimable-amount)
+  )
+)
+
+(define-read-only (get-claim-delegate (beneficiary principal))
+  (map-get? claim-delegates { beneficiary: beneficiary })
+)
+
+(define-public (set-claim-delegate (beneficiary principal) (delegate principal))
+  (let (
+    (schedule (unwrap! (get-vesting-schedule beneficiary) ERR_SCHEDULE_NOT_FOUND))
+  )
+    (asserts! (or (is-eq tx-sender beneficiary) (is-owner)) ERR_UNAUTHORIZED)
+    (asserts! (get active schedule) ERR_SCHEDULE_NOT_FOUND)
+    (map-set claim-delegates { beneficiary: beneficiary } { delegate: delegate })
+    (ok true)
+  )
+)
+
+(define-public (clear-claim-delegate (beneficiary principal))
+  (let (
+    (schedule (unwrap! (get-vesting-schedule beneficiary) ERR_SCHEDULE_NOT_FOUND))
+  )
+    (asserts! (or (is-eq tx-sender beneficiary) (is-owner)) ERR_UNAUTHORIZED)
+    (asserts! (get active schedule) ERR_SCHEDULE_NOT_FOUND)
+    (map-delete claim-delegates { beneficiary: beneficiary })
+    (ok true)
+  )
+)
+
+(define-public (claim-tokens-for (beneficiary principal))
+  (let (
+    (schedule (unwrap! (get-vesting-schedule beneficiary) ERR_SCHEDULE_NOT_FOUND))
+    (delegate-entry (default-to { delegate: beneficiary } (map-get? claim-delegates { beneficiary: beneficiary })))
+    (authorized (or (is-eq tx-sender beneficiary) (is-eq tx-sender (get delegate delegate-entry))))
+    (claimable-amount (unwrap! (get-claimable-amount beneficiary) ERR_NOTHING_TO_CLAIM))
+    (current-claimed (get claimed-amount schedule))
+  )
+    (asserts! authorized ERR_UNAUTHORIZED)
+    (asserts! (get active schedule) ERR_SCHEDULE_NOT_FOUND)
+    (asserts! (not (get paused schedule)) ERR_SCHEDULE_PAUSED)
+    (asserts! (> claimable-amount u0) ERR_NOTHING_TO_CLAIM)
+
+    (try! (as-contract (stx-transfer? claimable-amount tx-sender beneficiary)))
+
+    (map-set vesting-schedules
+      { beneficiary: beneficiary }
       (merge schedule { claimed-amount: (+ current-claimed claimable-amount) })
     )
 
