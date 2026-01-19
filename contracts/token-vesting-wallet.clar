@@ -13,6 +13,8 @@
 (define-constant ERR_INVALID_TEMPLATE_NAME (err u13))
 (define-constant ERR_SCHEDULE_PAUSED (err u14))
 (define-constant ERR_SCHEDULE_NOT_PAUSED (err u15))
+(define-constant ERR_NEW_BENEFICIARY_EXISTS (err u16))
+(define-constant ERR_SAME_BENEFICIARY (err u17))
 
 (define-data-var owner principal tx-sender)
 (define-data-var template-counter uint u0)
@@ -725,4 +727,26 @@
 
 (define-private (is-template-active (template {name: (string-ascii 64), description: (string-ascii 256), cliff-duration: uint, vesting-duration: uint, created-by: principal, active: bool}))
   (get active template)
+)
+
+(define-public (transfer-beneficiary-rights (new-beneficiary principal))
+  (let (
+    (current-schedule (unwrap! (get-vesting-schedule tx-sender) ERR_SCHEDULE_NOT_FOUND))
+    (current-balance (unwrap! (map-get? vesting-balances { beneficiary: tx-sender }) ERR_SCHEDULE_NOT_FOUND))
+    (new-schedule-exists (get-vesting-schedule new-beneficiary))
+  )
+    (asserts! (get active current-schedule) ERR_SCHEDULE_NOT_FOUND)
+    (asserts! (is-none new-schedule-exists) ERR_NEW_BENEFICIARY_EXISTS)
+    (asserts! (not (is-eq tx-sender new-beneficiary)) ERR_SAME_BENEFICIARY)
+    
+    (map-delete vesting-schedules { beneficiary: tx-sender })
+    (map-set vesting-schedules { beneficiary: new-beneficiary } current-schedule)
+    
+    (map-delete vesting-balances { beneficiary: tx-sender })
+    (map-set vesting-balances { beneficiary: new-beneficiary } current-balance)
+    
+    (map-delete claim-delegates { beneficiary: tx-sender })
+    
+    (ok true)
+  )
 )
