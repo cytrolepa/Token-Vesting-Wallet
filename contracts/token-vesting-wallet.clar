@@ -736,8 +736,8 @@
     (new-schedule-exists (get-vesting-schedule new-beneficiary))
   )
     (asserts! (get active current-schedule) ERR_SCHEDULE_NOT_FOUND)
-    (asserts! (is-none new-schedule-exists) ERR_NEW_BENEFICIARY_EXISTS)
-    (asserts! (not (is-eq tx-sender new-beneficiary)) ERR_SAME_BENEFICIARY)
+    (asserts! (is-none new-schedule-exists) ERR_SCHEDULE_ALREADY_EXISTS)
+    (asserts! (not (is-eq tx-sender new-beneficiary)) ERR_INVALID_BENEFICIARY)
     
     (map-delete vesting-schedules { beneficiary: tx-sender })
     (map-set vesting-schedules { beneficiary: new-beneficiary } current-schedule)
